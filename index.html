@@ -958,6 +958,10 @@ async function buildPDF() {
     let doc = null;
     const BAR = 44; // header bar height in pt
 
+    // Capture download date once for all pages
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+
     for (let i = 0; i < pages.length; i++) {
       const p = pages[i];
       const d = propData[p.id];
@@ -983,8 +987,8 @@ async function buildPDF() {
       doc.setFillColor(200, 152, 42);
       doc.rect(0, BAR - 2, pdfW, 2, 'F');
 
-      // Label
-      const label = `${p.label}     PIN: ${fmtDisplay(d.pin14)}`;
+      // Label: Property Name     PIN: XX-XX-XXX-XXX-XXXX     Date: MM/DD/YYYY
+      const label = `${p.label}     PIN: ${fmtDisplay(d.pin14)}     Date: ${dateStr}`;
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(14);
       doc.setTextColor(232, 224, 206);
