@@ -405,7 +405,8 @@ main {
           <th>Property</th>
           <th>Address / PIN</th>
           <th>Street View</th>
-          <th>Capture</th>
+          <th>Capture Property</th>
+          <th>Capture Date</th>
           <th>Preview</th>
         </tr>
       </thead>
@@ -495,8 +496,10 @@ const PROPS = [
    STATE
 ═══════════════════════════════════════════════ */
 let propData  = {};   // id → { pin14, lat, lon, address }
-let savedImgs = {};   // id → base64 string
+let propImgs  = {};   // id → base64 (Capture Property photo)
+let dateImgs  = {};   // id → base64 (Capture Date photo)
 let activeId  = null;
+let activeType = null; // 'property' or 'date'
 let cropB64   = null;
 let cropSel   = { x:0, y:0, w:0, h:0 };
 let isDragging = false, dragOrigin = { x:0, y:0 };
@@ -655,7 +658,6 @@ async function lookupAll() {
   btn.disabled = true;
   document.getElementById('lookupMsg').textContent = '';
   propData = {};
-  savedImgs = {};
 
   const filled = PROPS.filter(p => strip(document.getElementById(`inp_${p.id}`).value).length > 0);
   if (!filled.length) {
@@ -722,7 +724,8 @@ function renderResults() {
   PROPS.forEach(p => {
     const d = propData[p.id];
     if (!d) return;
-    const img = savedImgs[p.id];
+    const pi = propImgs[p.id];
+    const di = dateImgs[p.id];
     tbody.innerHTML += `
       <tr id="row_${p.id}">
         <td><div class="prop-name">${p.label}</div></td>
@@ -734,22 +737,27 @@ function renderResults() {
           <a class="view-link" href="${d.isv}" target="_blank" rel="noopener">View Picture ↗</a>
         </td>
         <td>
-          <button class="capture-btn ${img ? 'done' : ''}" id="capBtn_${p.id}" onclick="openModal('${p.id}')">
-            ${img ? '✓ Redo' : '+ Paste'}
+          <button class="capture-btn ${pi ? 'done' : ''}" id="capPropBtn_${p.id}" onclick="openModal('${p.id}','property')">
+            ${pi ? '✓ Redo' : '+ Paste'}
+          </button>
+        </td>
+        <td>
+          <button class="capture-btn ${di ? 'done' : ''}" id="capDateBtn_${p.id}" onclick="openModal('${p.id}','date')">
+            ${di ? '✓ Redo' : '+ Paste'}
           </button>
         </td>
         <td id="thumb_${p.id}">
-          ${img
-            ? `<img class="thumb-preview" src="${img}" alt=""/>`
-            : `<span class="no-thumb">—</span>`}
+          ${(pi || di) ? `<canvas id="previewCanvas_${p.id}" class="thumb-preview" style="display:block;"></canvas>` : '<span class="no-thumb">—</span>'}
         </td>
       </tr>`;
   });
+  // Draw composite previews after DOM is updated
+  PROPS.forEach(p => { if (propImgs[p.id] || dateImgs[p.id]) drawPreview(p.id); });
   refreshDownload();
 }
 
 function refreshDownload() {
-  const ready = PROPS.filter(p => propData[p.id] && savedImgs[p.id]);
+  const ready = PROPS.filter(p => propData[p.id] && (propImgs[p.id] || dateImgs[p.id]));
   const dl = document.getElementById('dlSection');
   const hint = document.getElementById('dlHint');
   if (ready.length > 0) {
@@ -760,10 +768,12 @@ function refreshDownload() {
     ready.forEach(p => {
       strip.innerHTML += `
         <div class="thumb-strip-item">
-          <img src="${savedImgs[p.id]}" alt="${p.label}"/>
+          <canvas id="stripCanvas_${p.id}" style="width:88px;height:60px;border:1px solid var(--border2);border-radius:2px;display:block;"></canvas>
           <div class="thumb-strip-item-lbl">${p.label}</div>
         </div>`;
     });
+    // Draw strip composites after DOM update
+    ready.forEach(p => drawComposite(`stripCanvas_${p.id}`, propImgs[p.id], dateImgs[p.id], 88, 60));
   } else {
     dl.classList.remove('show');
     hint.style.display = 'block';
@@ -773,14 +783,16 @@ function refreshDownload() {
 /* ═══════════════════════════════════════════════
    MODAL
 ═══════════════════════════════════════════════ */
-function openModal(id) {
+function openModal(id, type) {
   activeId = id;
+  activeType = type; // 'property' or 'date'
   cropB64 = null;
   cropSel = { x:0, y:0, w:0, h:0 };
 
   const p = PROPS.find(x => x.id === id);
   const d = propData[id];
-  document.getElementById('modalTitle').textContent = `Capture — ${p.label}`;
+  const typeLabel = type === 'date' ? 'Capture Date' : 'Capture Property';
+  document.getElementById('modalTitle').textContent = `${typeLabel} — ${p.label}`;
   document.getElementById('modalSub').textContent = d ? fmtDisplay(d.pin14) : '';
 
   // Reset crop
@@ -919,16 +931,67 @@ function savePhoto() {
     alert('No image loaded. Click "Paste Screenshot" or press Ctrl+V / ⌘V first.');
     return;
   }
-  savedImgs[activeId] = b64;
 
-  // Update table row
-  const thumb = document.getElementById(`thumb_${activeId}`);
-  if (thumb) thumb.innerHTML = `<img class="thumb-preview" src="${b64}" alt=""/>`;
-  const capBtn = document.getElementById(`capBtn_${activeId}`);
-  if (capBtn) { capBtn.textContent = '✓ Redo'; capBtn.classList.add('done'); }
+  if (activeType === 'date') {
+    dateImgs[activeId] = b64;
+    const btn = document.getElementById(`capDateBtn_${activeId}`);
+    if (btn) { btn.textContent = '✓ Redo'; btn.classList.add('done'); }
+  } else {
+    propImgs[activeId] = b64;
+    const btn = document.getElementById(`capPropBtn_${activeId}`);
+    if (btn) { btn.textContent = '✓ Redo'; btn.classList.add('done'); }
+  }
+
+  // Update preview cell with composite canvas
+  const thumbCell = document.getElementById(`thumb_${activeId}`);
+  if (thumbCell) {
+    if (!thumbCell.querySelector('canvas')) {
+      thumbCell.innerHTML = `<canvas id="previewCanvas_${activeId}" class="thumb-preview" style="display:block;"></canvas>`;
+    }
+    drawPreview(activeId);
+  }
 
   closeModal();
   refreshDownload();
+}
+
+/* Draw composite into table preview canvas */
+function drawPreview(id) {
+  const canvas = document.getElementById(`previewCanvas_${id}`);
+  if (!canvas) return;
+  drawComposite(canvas, propImgs[id], dateImgs[id], 64, 44);
+}
+
+/* Draw property photo with date photo overlaid at bottom-right */
+function drawComposite(canvasOrId, propB64, dateB64, w, h) {
+  const canvas = typeof canvasOrId === 'string' ? document.getElementById(canvasOrId) : canvasOrId;
+  if (!canvas) return;
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+
+  const drawImg = (src, x, y, dw, dh, cb) => {
+    if (!src) { cb && cb(); return; }
+    const img = new Image();
+    img.onload = () => { ctx.drawImage(img, x, y, dw, dh); cb && cb(); };
+    img.src = src;
+  };
+
+  if (propB64 && dateB64) {
+    // Draw property photo full size, then overlay date at bottom
+    drawImg(propB64, 0, 0, w, h, () => {
+      const ow = Math.round(w * 0.45), oh = Math.round(h * 0.45);
+      const ox = w - ow - 2, oy = h - oh - 2;
+      // Semi-transparent border for the overlay
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(ox - 1, oy - 1, ow + 2, oh + 2);
+      drawImg(dateB64, ox, oy, ow, oh);
+    });
+  } else if (propB64) {
+    drawImg(propB64, 0, 0, w, h);
+  } else if (dateB64) {
+    drawImg(dateB64, 0, 0, w, h);
+  }
 }
 
 /* ═══════════════════════════════════════════════
@@ -943,6 +1006,39 @@ function imgDims(b64) {
   });
 }
 
+/* Build full-res composite PNG for PDF export */
+function buildCompositeB64(propB64, dateB64) {
+  return new Promise(resolve => {
+    if (!propB64 && !dateB64) { resolve(''); return; }
+    if (propB64 && !dateB64) { resolve(propB64); return; }
+    if (!propB64 && dateB64) { resolve(dateB64); return; }
+
+    const propImg = new Image(), dateImg = new Image();
+    propImg.onload = () => {
+      const W = propImg.naturalWidth, H = propImg.naturalHeight;
+      const oc = document.createElement('canvas');
+      oc.width = W; oc.height = H;
+      const ctx = oc.getContext('2d');
+      ctx.drawImage(propImg, 0, 0, W, H);
+
+      dateImg.onload = () => {
+        // Overlay date image at bottom-right: 40% width, proportional height
+        const ow = Math.round(W * 0.40);
+        const oh = Math.round(dateImg.naturalHeight * (ow / dateImg.naturalWidth));
+        const ox = W - ow - Math.round(W * 0.01);
+        const oy = H - oh - Math.round(H * 0.01);
+        // Dark semi-transparent border
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(ox - 3, oy - 3, ow + 6, oh + 6);
+        ctx.drawImage(dateImg, ox, oy, ow, oh);
+        resolve(oc.toDataURL('image/png'));
+      };
+      dateImg.src = dateB64;
+    };
+    propImg.src = propB64;
+  });
+}
+
 async function buildPDF() {
   const btn = document.getElementById('dlBtn');
   const status = document.getElementById('dlStatus');
@@ -952,21 +1048,19 @@ async function buildPDF() {
 
   try {
     const { jsPDF } = window.jspdf;
-    const pages = PROPS.filter(p => propData[p.id] && savedImgs[p.id]);
+    const pages = PROPS.filter(p => propData[p.id] && (propImgs[p.id] || dateImgs[p.id]));
     if (!pages.length) throw new Error('No photos to export');
 
     let doc = null;
-    const BAR = 44; // header bar height in pt
-
-    // Capture download date once for all pages
-    const now = new Date();
-    const dateStr = now.toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+    const BAR = 44;
 
     for (let i = 0; i < pages.length; i++) {
       const p = pages[i];
       const d = propData[p.id];
-      const b64 = savedImgs[p.id];
-      const { w: iw, h: ih } = await imgDims(b64);
+
+      // Build composite image on an offscreen canvas
+      const compB64 = await buildCompositeB64(propImgs[p.id], dateImgs[p.id]);
+      const { w: iw, h: ih } = await imgDims(compB64);
 
       const maxW = 1100;
       const pdfW = Math.min(iw, maxW);
@@ -987,8 +1081,8 @@ async function buildPDF() {
       doc.setFillColor(200, 152, 42);
       doc.rect(0, BAR - 2, pdfW, 2, 'F');
 
-      // Label: Property Name     PIN: XX-XX-XXX-XXX-XXXX     Date: MM/DD/YYYY
-      const label = `${p.label}     PIN: ${fmtDisplay(d.pin14)}     Date: ${dateStr}`;
+      // Label: Property Name     PIN: XX-XX-XXX-XXX-XXXX
+      const label = `${p.label}     PIN: ${fmtDisplay(d.pin14)}`;
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(14);
       doc.setTextColor(232, 224, 206);
@@ -1000,12 +1094,11 @@ async function buildPDF() {
       doc.setTextColor(100, 90, 70);
       doc.text(`${i+1} / ${pages.length}`, pdfW - 14, BAR - 15, { align: 'right' });
 
-      // Image
-      const fmt = b64.match(/^data:image\/(jpe?g)/) ? 'JPEG' : 'PNG';
-      doc.addImage(b64, fmt, 0, BAR, pdfW, pdfH - BAR);
+      // Composite image
+      doc.addImage(compB64, 'PNG', 0, BAR, pdfW, pdfH - BAR);
     }
 
-    doc.save('streetshot_properties.pdf');
+    doc.save('picture_finder_properties.pdf');
     status.className = 'dl-status ok';
     status.textContent = `✓ Downloaded — ${pages.length} page${pages.length > 1 ? 's' : ''}.`;
   } catch(e) {
@@ -1020,7 +1113,7 @@ async function buildPDF() {
    CLEAR ALL
 ═══════════════════════════════════════════════ */
 function clearAll() {
-  propData = {}; savedImgs = {};
+  propData = {}; propImgs = {}; dateImgs = {};
   PROPS.forEach(p => {
     const inp = document.getElementById(`inp_${p.id}`);
     if (inp) inp.value = '';
